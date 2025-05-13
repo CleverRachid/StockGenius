@@ -1,21 +1,27 @@
 # app.py
 from flask import Flask, jsonify, request
 from flask_sqlalchemy import SQLAlchemy
-from models import db, User, Product, Category, Zone, Inventory, Sensor, SensorData, Alert, Order, OrderPrediction
+from models import db, User, Product, Category, Zone, Inventory, Sensor, SensorData,Customer, Alert, Order, OrderPrediction
 from datetime import datetime
 from functools import wraps
-from flask_jwt_extended import verify_jwt_in_request, get_jwt
+from flask_jwt_extended import verify_jwt_in_request, get_jwt 
 from flask_cors import CORS
-
 # login
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 from datetime import timedelta
 from werkzeug.security import generate_password_hash
+from flask_jwt_extended import verify_jwt_in_request, get_jwt
+from generate_alerts import generate_all_alerts  
+from apscheduler.schedulers.background import BackgroundScheduler
+import serial
+import threading
+from flask import jsonify, request
+import time
 
 # Initialisation de l'application
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "http://localhost:4200"}})  # Remplacez par l'URL de votre frontend
-
+CORS(app, resources={r"/api/*": {"origins": "*"}})  # Remplacez par l'URL de votre frontend
+CORS(app, origins=["*"], supports_credentials=True)
 
 # Configuration JWT après l'initialisation de l'application
 app.config['JWT_SECRET_KEY'] = 'KEY00155'  # Changez ceci en production!
@@ -23,8 +29,8 @@ app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=24)  # Token valide pou
 jwt = JWTManager(app)
 
 # Configuration de la base de données MySQL
-app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+pymysql://root:root@localhost/stock_genius'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+pymysql://root@localhost/stock_genius'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = True
 app.config['SECRET_KEY'] = 'KEY00155'  # Important pour la sécurité
 
 # Initialisation de la base de données avec l'application
@@ -71,7 +77,7 @@ def login():
     
     # Création du token avec les informations utiles
     access_token = create_access_token(
-        identity=user.id,
+        identity=str(user.id),
         additional_claims={
             'username': user.username,
             'email': user.email,
@@ -125,7 +131,7 @@ def register():
     
     # Créer un token pour le nouvel utilisateur
     access_token = create_access_token(
-        identity=new_user.id,
+        identity=str(new_user.id),
         additional_claims={
             'username': new_user.username,
             'email': new_user.email,
@@ -205,6 +211,167 @@ def create_user():
             'role': new_user.role
         }
     }), 201
+
+# ---------------------- ROUTES POUR CLIENTS ----------------------
+
+# Obtenir tous les clients
+@app.route('/api/customers', methods=['GET'])
+@jwt_required()
+def get_customers():
+    customers = Customer.query.all()
+    result = []
+    for customer in customers:
+        result.append({
+            'id': customer.id,
+            'name': customer.name,
+            'email': customer.email,
+            'phone': customer.phone,
+            'address': customer.address
+        })
+    return jsonify(result), 200
+
+# Créer un client
+@app.route('/api/customers', methods=['POST'])
+@jwt_required()
+def create_customer():
+    data = request.get_json()
+    if not data.get('name') or not data.get('email'):
+        return jsonify({'error': 'Le nom et l\'email sont obligatoires'}), 400
+
+    if Customer.query.filter_by(email=data['email']).first():
+        return jsonify({'error': 'Un client avec cet email existe déjà'}), 409
+
+    new_customer = Customer(
+        name=data['name'],
+        email=data['email'],
+        phone=data.get('phone'),
+        address=data.get('address')
+    )
+    db.session.add(new_customer)
+    db.session.commit()
+    return jsonify({'message': 'Client créé avec succès'}), 201
+
+# Modifier un client
+@app.route('/api/customers/<int:customer_id>', methods=['PUT'])
+@jwt_required()
+def update_customer(customer_id):
+    customer = Customer.query.get(customer_id)
+    if not customer:
+        return jsonify({'error': 'Client non trouvé'}), 404
+
+    data = request.get_json()
+    customer.name = data.get('name', customer.name)
+    customer.email = data.get('email', customer.email)
+    customer.phone = data.get('phone', customer.phone)
+    customer.address = data.get('address', customer.address)
+    db.session.commit()
+    return jsonify({'message': 'Client mis à jour avec succès'}), 200
+
+# Supprimer un client
+@app.route('/api/customers/<int:customer_id>', methods=['DELETE'])
+@jwt_required()
+def delete_customer(customer_id):
+    customer = Customer.query.get(customer_id)
+    if not customer:
+        return jsonify({'error': 'Client non trouvé'}), 404
+    db.session.delete(customer)
+    db.session.commit()
+    return jsonify({'message': 'Client supprimé avec succès'}), 200
+
+
+# GET all orders
+@app.route('/api/orders', methods=['GET'])
+@jwt_required()
+def get_orders():
+    orders = Order.query.all()
+    result = []
+    for order in orders:
+        result.append({
+            'id': order.id,
+            'customer_id': order.customer_id,
+            'status': order.status,
+            'created_at': order.created_at,
+            'delivered_at': order.delivered_at,
+            'returned_at':order.returned_at,
+            'user_id':order.user_id,
+            'quantity':order.quantity,
+            'product_id':order.product_id
+            
+        })
+    return jsonify(result), 200
+
+# GET one order by ID
+@app.route('/api/orders/<int:order_id>', methods=['GET'])
+@jwt_required()
+def get_order(order_id):
+    order = Order.query.get(order_id)
+    if not order:
+        return jsonify({'error': 'Commande non trouvée'}), 404
+    return jsonify({
+        'id': order.id,
+        'customer_id': order.customer_id,
+        'status': order.status,
+        'created_at': order.created_at,
+        'delivered_at': order.delivered_at,
+        'returned_at':order.returned_at,
+        'user_id':order.user_id,
+        'quantity':order.quantity,
+        'product_id':order.product_id
+    }), 200
+
+@app.route('/api/orders', methods=['POST'])
+@jwt_required()
+def create_order():
+    data = request.get_json()
+    if not data or 'customer_id' not in data or 'product_id' not in data or 'quantity' not in data:
+        return jsonify({'error': 'customer_id, product_id et quantity sont requis'}), 400
+
+    user_id = get_jwt_identity()  # Si tu utilises JWT pour identifier l'utilisateur connecté
+
+    new_order = Order(
+        customer_id=data['customer_id'],
+        product_id=data['product_id'],
+        quantity=data['quantity'],
+        status=data.get('status', 'en attente'),
+        user_id=user_id
+    )
+    db.session.add(new_order)
+    db.session.commit()
+    return jsonify({'message': 'Commande créée avec succès', 'order_id': new_order.id}), 201
+# UPDATE an order
+@app.route('/api/orders/<int:order_id>', methods=['PUT'])
+@jwt_required()
+def update_order(order_id):
+    order = Order.query.get(order_id)
+    if not order:
+        return jsonify({'error': 'Commande non trouvée'}), 404
+
+    data = request.get_json()
+    order.status = data.get('status', order.status)
+    order.quantity = data.get('quantity', order.quantity)
+    order.delivered_at = data.get('delivered_at', order.delivered_at)
+    order.returned_at = data.get('returned_at', order.returned_at)
+    # Tu peux aussi permettre de changer product_id ou customer_id si besoin
+    db.session.commit()
+    return jsonify({'message': 'Commande mise à jour avec succès'}), 200
+
+
+# DELETE an order
+@app.route('/api/orders/<int:order_id>', methods=['DELETE'])
+@jwt_required()
+def delete_order(order_id):
+    order = Order.query.get(order_id)
+    if not order:
+        return jsonify({'error': 'Commande non trouvée'}), 404
+
+    try:
+        db.session.delete(order)
+        db.session.commit()
+        return jsonify({'message': 'Commande supprimée avec succès'}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': 'Erreur lors de la suppression', 'details': str(e)}), 500
+
 
 
 # Routes pour les produits
@@ -290,7 +457,61 @@ def create_category():
             'description': new_category.description
         }
     }), 201
-
+#Supprimer un produit
+@app.route('/api/products/<int:product_id>', methods=['DELETE'])
+@jwt_required()
+def delete_product(product_id):
+    # Vérifier si le produit existe
+    product = Product.query.get(product_id)
+    if not product:
+        return jsonify({'error': 'Produit non trouvé'}), 404
+    
+    # Supprimer le produit
+    db.session.delete(product)
+    db.session.commit()
+    
+    return jsonify({'message': 'Produit supprimé avec succès'}), 200
+#Modifier un Produit
+@app.route('/api/products/<int:product_id>', methods=['PUT'])
+@jwt_required()
+def update_product(product_id):
+    # Vérifier si le produit existe
+    product = Product.query.get(product_id)
+    if not product:
+        return jsonify({'error': 'Produit non trouvé'}), 404
+    
+    # Récupérer les données JSON envoyées dans la requête
+    data = request.get_json()
+    
+    # Mettre à jour les champs du produit
+    product.designation = data.get('designation', product.designation)
+    product.description = data.get('description', product.description)
+    product.category_id = data.get('category_id', product.category_id)
+    product.min_threshold = data.get('min_threshold', product.min_threshold)
+    product.max_threshold = data.get('max_threshold', product.max_threshold)
+    product.rfid_tag = data.get('rfid_tag', product.rfid_tag)
+    
+    # Valider que la catégorie existe (si elle est modifiée)
+    if 'category_id' in data:
+        category = Category.query.get(data['category_id'])
+        if not category:
+            return jsonify({'error': 'Catégorie non trouvée'}), 404
+    
+    # Sauvegarder les modifications dans la base de données
+    db.session.commit()
+    
+    return jsonify({
+        'message': 'Produit mis à jour avec succès',
+        'product': {
+            'id': product.id,
+            'designation': product.designation,
+            'description': product.description,
+            'category': Category.query.get(product.category_id).name,
+            'min_threshold': product.min_threshold,
+            'max_threshold': product.max_threshold,
+            'rfid_tag': product.rfid_tag
+        }
+    }), 200
 # Routes pour les zones
 @app.route('/api/zones', methods=['GET'])
 def get_zones():
@@ -394,7 +615,628 @@ def create_inventory():
             }
         }), 201
 
+#alerte
+# Route pour obtenir les alertes résolues
+@app.route('/api/alerts/resolved', methods=['GET'])
+@jwt_required()
+def get_resolved_alerts():
+    resolved_alerts = Alert.query.filter_by(status="résolu").all()
+    result = []
+    for alert in resolved_alerts:
+        # Récupérer les informations du produit associé
+        product_info = None
+        if alert.product_id:
+            product = Product.query.get(alert.product_id)
+            if product:
+                product_info = {
+                    'id': product.id,
+                    'designation': product.designation
+                }
+        
+        # Récupérer les informations de l'utilisateur associé
+        user_info = None
+        if alert.user_id:
+            user = User.query.get(alert.user_id)
+            if user:
+                user_info = {
+                    'id': user.id,
+                    'username': user.username
+                }
+        
+        result.append({
+            'id': alert.id,
+            'type': alert.type,
+            'status': alert.status,
+            'created_at': alert.created_at,
+            'product': product_info,
+            'user': user_info
+        })
+    
+    return jsonify(result), 200
+
+# Route pour obtenir les alertes non résolues
+@app.route('/api/alerts/unresolved', methods=['GET'])
+@jwt_required()
+def get_unresolved_alerts():
+    unresolved_alerts = Alert.query.filter(Alert.status != "résolu").all()
+    result = []
+    for alert in unresolved_alerts:
+        # Récupérer les informations du produit associé
+        product_info = None
+        if alert.product_id:
+            product = Product.query.get(alert.product_id)
+            if product:
+                product_info = {
+                    'id': product.id,
+                    'designation': product.designation
+                }
+        
+        # Récupérer les informations de l'utilisateur associé
+        user_info = None
+        if alert.user_id:
+            user = User.query.get(alert.user_id)
+            if user:
+                user_info = {
+                    'id': user.id,
+                    'username': user.username
+                }
+        
+        result.append({
+            'id': alert.id,
+            'type': alert.type,
+            'status': alert.status,
+            'created_at': alert.created_at,
+            'product': product_info,
+            'user': user_info
+        })
+    
+    return jsonify(result), 200
+
+# Route pour obtenir toutes les alertes avec filtrage par statut
+@app.route('/api/alerts', methods=['GET'])
+@jwt_required()
+def get_alerts():
+    # Récupérer le paramètre de requête 'status' s'il existe
+    status = request.args.get('status')
+    
+    # Construire la requête en fonction du paramètre
+    query = Alert.query
+    if status:
+        query = query.filter_by(status=status)
+    
+    alerts = query.all()
+    result = []
+    for alert in alerts:
+        # Récupérer les informations du produit associé
+        product_info = None
+        if alert.product_id:
+            product = Product.query.get(alert.product_id)
+            if product:
+                product_info = {
+                    'id': product.id,
+                    'designation': product.designation
+                }
+        
+        # Récupérer les informations de l'utilisateur associé
+        user_info = None
+        if alert.user_id:
+            user = User.query.get(alert.user_id)
+            if user:
+                user_info = {
+                    'id': user.id,
+                    'username': user.username
+                }
+        
+        result.append({
+            'id': alert.id,
+            'type': alert.type,
+            'status': alert.status,
+            'created_at': alert.created_at,
+            'product': product_info,
+            'user': user_info
+        })
+    
+    return jsonify(result), 200
+@app.route('/api/alerts/<int:alert_id>/resolve', methods=['POST'])
+@jwt_required()
+def resolve_alert(alert_id):
+    """
+    Route pour marquer une alerte comme résolue
+    """
+    # Récupérer l'alerte
+    alert = Alert.query.get(alert_id)
+    if not alert:
+        return jsonify({'error': 'Alerte non trouvée'}), 404
+    
+    # Mettre à jour le statut de l'alerte
+    alert.status = "résolu"
+    
+    # Enregistrer les modifications
+    db.session.commit()
+    
+    return jsonify({
+        'message': 'Alerte résolue avec succès',
+        'alert': {
+            'id': alert.id,
+            'type': alert.type,
+            'status': alert.status
+        }
+    }), 200
+# 👇 Démarrer le scheduler
+def start_scheduler():
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(func=generate_alerts_job, trigger="interval", minutes=7)#minutes
+    scheduler.start()
+
+# 👇 Wrapper pour exécuter les alertes dans le contexte Flask
+def generate_alerts_job():
+    with app.app_context():
+        generate_all_alerts()
+        print("✅ Alertes générées automatiquement")
+   
+#CODE ARDUINO /////////////////////////////////////////////////////////////////////
+# Configuration du port série Arduino (à ajuster selon votre configuration)
+SERIAL_PORT = 'COM4'  # Changez selon votre port Arduino
+BAUD_RATE = 9600
+arduino_serial = None
+
+# Fonction pour initialiser la connexion série avec Arduino
+def init_arduino_serial():
+    global arduino_serial
+    try:
+        arduino_serial = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+        print(f"✅ Connexion établie avec Arduino sur {SERIAL_PORT}")
+        return True
+    except serial.SerialException as e:
+        print(f"❌ Erreur de connexion au port série: {e}")
+        return False
+
+# Créer un client
+@app.route('/api/sensordata', methods=['POST'])
+@jwt_required()
+def create_sensortrace():
+    data = request.get_json()
+    if not data.get('uid') or not data.get('id') or not data.get('product'):
+        return jsonify({'error': 'Le id et le produit sont obligatoires'}), 400
+
+    if Customer.query.filter_by(produit=data['produit']).first():
+        return jsonify({'error': 'Un client avec cet email existe déjà'}), 409
+
+    new_sensordata = SensorData(
+        sensor_id = data['uid'],
+        value = data['data'],
+        saved_at = datetime.utcnow()
+    )
+    print(f"✅saavveedd {new_sensordata}")
+    db.session.add(new_sensordata)
+    db.session.commit()
+    return jsonify({'message': 'Client créé avec succès'}), 201
+
+# Fonction pour lire les données RFID en continu
+# Fonction pour lire les données RFID en continu
+def read_rfid_data():
+    global arduino_serial
+    
+    while True:
+        try:
+            if arduino_serial and arduino_serial.is_open and arduino_serial.in_waiting:
+                # Lire une ligne depuis Arduino
+                data_str = arduino_serial.readline().decode('utf-8').strip()
+                
+                # Ignorer les lignes vides
+                if not data_str:
+                    continue
+                
+                print(f"📡 Données reçues brutes: '{data_str}'")
+                
+                try:
+                    import json
+                    
+                    # Tenter d'extraire les données JSON
+                    try:
+                        data_json = json.loads(data_str)
+                        uid = data_json.get("uid", "")
+                        
+                        # Débogage détaillé des données reçues
+                        print(f"🔍 Structure JSON complète: {json.dumps(data_json, indent=2)}")
+                        
+                        # Extraire et vérifier le poids explicitement
+                        raw_weight = None
+                        if "weight" in data_json:
+                            raw_weight = data_json["weight"]
+                            print(f"🔍 Poids trouvé directement: {raw_weight} (type: {type(raw_weight)})")
+                        elif isinstance(data_json.get("data"), dict) and "weight" in data_json["data"]:
+                            raw_weight = data_json["data"]["weight"]
+                            print(f"🔍 Poids trouvé dans data: {raw_weight} (type: {type(raw_weight)})")
+                        
+                        # Essayer de convertir le poids en float si c'est une chaîne
+                        weight = None
+                        if raw_weight is not None:
+                            try:
+                                weight_grams = raw_weight
+                                weight = round(weight_grams / 1000, 3)
+                                print(f"✅ Poids converti de {weight_grams}g à {weight}kg")
+                                print(f"✅ Poids converti avec succès: {weight}")
+                            except (ValueError, TypeError):
+                                print(f"⚠️ Impossible de convertir le poids en nombre: {raw_weight}")
+                        
+                    except json.JSONDecodeError as json_err:
+                        print(f"⚠️ Erreur de décodage JSON: {json_err}")
+                        uid = data_str
+                        weight = None
+                    
+                    # Traiter les données dans le contexte de l'application
+                    with app.app_context():
+                        # Vérifier si une entrée similaire existe dans les 5 dernières minutes
+                        five_min_ago = datetime.utcnow() - timedelta(minutes=5)
+                        
+                        # Rechercher un enregistrement récent avec le même uid
+                        existing_record = SensorData.query.filter(
+                            SensorData.value.like(f"%{uid}%"),
+                            SensorData.saved_at >= five_min_ago
+                        ).order_by(SensorData.saved_at.desc()).first()
+                        
+                        if existing_record and uid:  # Vérifier que uid n'est pas vide
+                            # Afficher l'enregistrement existant pour débogage
+                            print(f"🔍 Enregistrement existant trouvé: ID={existing_record.id}, Valeur={existing_record.value}")
+                            
+                            # Mettre à jour uniquement le poids de l'enregistrement existant
+                            try:
+                                existing_data = json.loads(existing_record.value)
+                                
+                                # Sauvegarder l'ancien poids pour comparaison
+                                old_weight = None
+                                if "weight" in existing_data:
+                                    old_weight = existing_data["weight"]
+                                elif isinstance(existing_data.get("data"), dict) and "weight" in existing_data["data"]:
+                                    old_weight = existing_data["data"]["weight"]
+                                
+                                # Mettre à jour le poids seulement s'il est différent
+                                if weight is not None and weight != old_weight:
+                                    # Mettre à jour selon la structure
+                                    if "weight" in existing_data:
+                                        existing_data["weight"] = weight
+                                    elif isinstance(existing_data.get("data"), dict):
+                                        existing_data["data"]["weight"] = weight
+                                    
+                                    # Sauvegarder les données mises à jour
+                                    existing_record.value = json.dumps(existing_data)[:255]
+                                    db.session.commit()
+                                    print(f"✅ Poids mis à jour: {old_weight} -> {weight} pour l'ID: {existing_record.id}")
+                                else:
+                                    print(f"ℹ️ Pas de mise à jour nécessaire, poids inchangé: {weight}")
+                            except Exception as update_err:
+                                print(f"❌ Erreur lors de la mise à jour: {update_err}")
+                        else:
+                            # Créer un nouvel enregistrement
+                            new_sensor_data = SensorData(
+                                value=data_str[:255],  # Limiter à 255 caractères
+                                stored=False
+                            )
+                            db.session.add(new_sensor_data)
+                            db.session.commit()
+                            print(f"✅ Nouvel enregistrement créé avec succès! ID: {new_sensor_data.id}")
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    db.session.rollback()
+                    print(f"❌ Erreur de traitement des données: {e}")
+            
+            time.sleep(0.1)  # Pause pour éviter une utilisation CPU excessive
+            
+        except Exception as e:
+            print(f"❌ Erreur lors de la lecture RFID: {e}")
+            time.sleep(1)  # Attendre avant de réessayer
+
+# Fonction auxiliaire pour mettre à jour un produit avec les données RFID
+def update_product_with_rfid_data(product_id, card_data, uid):
+    try:
+        product = Product.query.get(product_id)
+        if product:
+            # Mettre à jour le produit avec les données de la carte
+            if 'name' in card_data:
+                product.designation = card_data['name']
+            if 'description' in card_data:
+                product.description = card_data['description']
+            # Ajouter d'autres champs selon vos besoins
+            
+            # Mettre à jour le tag RFID si ce n'est pas déjà fait
+            if not product.rfid_tag and uid:
+                product.rfid_tag = uid
+                
+            db.session.commit()
+            print(f"✅ Produit ID {product_id} mis à jour avec les données RFID")
+        else:
+            print(f"⚠️ Produit ID {product_id} non trouvé dans la base de données")
+    except Exception as e:
+        db.session.rollback()
+        print(f"❌ Erreur lors de la mise à jour du produit: {e}")
+
+# Fonction pour traiter les données RFID
+def process_rfid_data(data):
+    with app.app_context():
+        uid = data.get("uid", "").upper()  # On récupère toujours l'UID pour l'authentification
+        card_data = data.get("data", None)
+        
+        # Si des données sont stockées sur la carte
+        if card_data:
+            try:
+                # Extraire uniquement les informations importantes
+                product_info = {
+                    'product_id': card_data.get('id'),
+                    'product_name': card_data.get('name'),
+                    'price': card_data.get('price'),
+                    'quantity': card_data.get('quantity', 0)
+                }
+                
+                print(f"✅ Informations du produit: {product_info}")
+                
+                # Enregistrer les données dans SensorData
+                # Utilisez le bon nom de champ pour l'horodatage dans votre modèle
+                new_sensor_data = SensorData(
+                    sensor_id=1,  # ID du capteur RFID
+                    value=str(product_info),
+                    # Si votre modèle a un champ 'created_at' au lieu de 'timestamp'
+                    # created_at=datetime.utcnow()
+                )
+                db.session.add(new_sensor_data)
+                db.session.commit()
+                
+                return product_info  # Retourner uniquement les infos du produit
+                
+            except Exception as e:
+                db.session.rollback()
+                print(f"❌ Erreur lors du traitement des données: {e}")
+                return None
+        
+        # Si pas de données sur la carte, on renvoie None
+        print("⚠️ Aucune donnée produit trouvée sur cette carte")
+        return None
+# Route pour démarrer la lecture RFID
+@app.route('/api/rfid/start', methods=['POST'])
+@jwt_required()
+@role_required(['admin'])  # Limiter aux administrateurs
+def start_rfid_reader():
+    """Démarrer la lecture RFID"""
+    global arduino_serial
+    
+    if arduino_serial and arduino_serial.is_open:
+        return jsonify({"message": "Le lecteur RFID est déjà démarré"}), 200
+    
+    if init_arduino_serial():
+        # Démarrer le thread de lecture RFID
+        rfid_thread = threading.Thread(target=read_rfid_data, daemon=True)
+        rfid_thread.start()
+        return jsonify({"message": "Lecteur RFID démarré avec succès"}), 200
+    else:
+        return jsonify({"error": "Impossible de se connecter au lecteur RFID"}), 500
+
+# Route pour arrêter la lecture RFID
+@app.route('/api/rfid/stop', methods=['POST'])
+@jwt_required()
+@role_required(['admin'])  # Limiter aux administrateurs
+def stop_rfid_reader():
+    """Arrêter la lecture RFID"""
+    global arduino_serial
+    
+    if arduino_serial and arduino_serial.is_open:
+        arduino_serial.close()
+        arduino_serial = None
+        return jsonify({"message": "Lecteur RFID arrêté avec succès"}), 200
+    else:
+        return jsonify({"message": "Le lecteur RFID n'était pas démarré"}), 200
+
+# Route pour obtenir les dernières lectures RFID
+@app.route('/api/rfid/readings', methods=['GET'])
+@jwt_required()
+def get_rfid_readings():
+    """Obtenir les dernières lectures RFID"""
+    # Nombre de lectures à récupérer (par défaut 10)
+    limit = request.args.get('limit', 10, type=int)
+    
+    # Récupérer les données du capteur RFID (sensor_id=1 pour RFID)
+    readings = SensorData.query.filter_by(sensor_id=1).order_by(SensorData.timestamp.desc()).limit(limit).all()
+    
+    result = []
+    for reading in readings:
+        data = {
+            'id': reading.id,
+            'value': reading.value,
+            'timestamp': reading.timestamp
+        }
+        
+        # Ajouter les informations sur le produit si disponible
+        if reading.product_id:
+            product = Product.query.get(reading.product_id)
+            if product:
+                data['product'] = {
+                    'id': product.id,
+                    'designation': product.designation,
+                    'category': product.category.name
+                }
+        
+        result.append(data)
+    
+    return jsonify(result), 200
+
+# Route pour associer une carte RFID à un produit
+@app.route('/api/products/<int:product_id>/assign-rfid', methods=['POST'])
+@jwt_required()
+@role_required(['admin', 'manager'])
+def assign_rfid_to_product(product_id):
+    """Associer une carte RFID à un produit"""
+    # Vérifier si le produit existe
+    product = Product.query.get(product_id)
+    if not product:
+        return jsonify({'error': 'Produit non trouvé'}), 404
+    
+    data = request.get_json()
+    if not data or 'rfid_tag' not in data:
+        return jsonify({'error': 'rfid_tag est requis'}), 400
+    
+    # Vérifier si le tag RFID est déjà utilisé par un autre produit
+    existing_product = Product.query.filter_by(rfid_tag=data['rfid_tag']).first()
+    if existing_product and existing_product.id != product_id:
+        return jsonify({'error': 'Ce tag RFID est déjà attribué à un autre produit'}), 409
+    
+    # Mettre à jour le produit
+    product.rfid_tag = data['rfid_tag']
+    db.session.commit()
+    
+    return jsonify({
+        'message': 'Tag RFID associé avec succès',
+        'product': {
+            'id': product.id,
+            'designation': product.designation,
+            'rfid_tag': product.rfid_tag
+        }
+    }), 200
+
+# Route pour associer une carte RFID à un utilisateur
+@app.route('/api/users/<int:user_id>/assign-rfid', methods=['POST'])
+@jwt_required()
+@role_required(['admin'])
+def assign_rfid_to_user(user_id):
+    """Associer une carte RFID à un utilisateur"""
+    # Vérifier si l'utilisateur existe
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'error': 'Utilisateur non trouvé'}), 404
+    
+    data = request.get_json()
+    if not data or 'rfid_card' not in data:
+        return jsonify({'error': 'rfid_card est requis'}), 400
+    
+    # Vérifier si la carte RFID est déjà utilisée par un autre utilisateur
+    existing_user = User.query.filter_by(rfid_card=data['rfid_card']).first()
+    if existing_user and existing_user.id != user_id:
+        return jsonify({'error': 'Cette carte RFID est déjà attribuée à un autre utilisateur'}), 409
+    
+    # Mettre à jour l'utilisateur
+    user.rfid_card = data['rfid_card']
+    db.session.commit()
+    
+    return jsonify({
+        'message': 'Carte RFID associée avec succès',
+        'user': {
+            'id': user.id,
+            'username': user.username,
+            'rfid_card': user.rfid_card
+        }
+    }), 200
+
+@app.route('/api/rfid/data', methods=['POST'])
+def receive_rfid_data():
+    try:
+        # Récupérer les données
+        data = request.json
+        
+        if not data:
+            return jsonify({"error": "Données JSON manquantes"}), 400
+            
+        # Extraire les informations
+        uid = data.get('uid')
+        weight = data.get('weight', 0)
+        card_data = data.get('data', '')
+        
+        # Se connecter à la base de données
+        conn = mysql.connector.connect(**db_config)
+        cursor = conn.cursor()
+        
+        # Enregistrer les données
+        query = """
+        INSERT INTO sensor_data (sensor_id, value, weight, timestamp) 
+        VALUES (%s, %s, %s, %s)
+        """
+        cursor.execute(query, (1, card_data, weight, datetime.now()))
+        
+        # Valider et fermer la connexion
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            "message": "Données RFID enregistrées avec succès",
+            "uid": uid,
+            "timestamp": datetime.now().isoformat()
+        }), 201
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == '_main_':
+    app.run(debug=True, host='0.0.0.0', port=5000)
+
+
+from flask import jsonify, Blueprint
+
+# Créer un Blueprint pour les API
+api_bp = Blueprint('api', __name__)
+
+@api_bp.route('/last_sensor_data', methods=['GET'])
+def get_last_sensor_data():
+    """
+    Endpoint API pour récupérer les dernières données de capteur qui n'a pas encore été traitée (stored=False)
+    """
+    try:
+        # Récupérer la dernière entrée qui n'a pas encore été traitée (stored=False)
+        last_data = SensorData.query.filter(
+            SensorData.stored == False
+        ).order_by(SensorData.saved_at.desc()).first()
+        
+        if last_data:
+            # Parser les données JSON de la colonne value
+            import json
+            try:
+                value_data = json.loads(last_data.value)
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'id': last_data.id,
+                        'value': value_data,
+                        'saved_at': last_data.saved_at.isoformat() if last_data.saved_at else None
+                    }
+                })
+            except json.JSONDecodeError:
+                return jsonify({
+                    'success': False,
+                    'error': 'Format de données incorrect',
+                    'raw_value': last_data.value
+                })
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'Aucune donnée trouvée'
+            })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        })
+
+# Enregistrez ce Blueprint dans votre application principale
+# Dans votre app.py ou équivalent:
+# app.register_blueprint(api_bp, url_prefix='/api')
+# Enregistrement du blueprint avec un préfixe correct
+app.register_blueprint(api_bp, url_prefix='/api')
+
+# Ajoutez une route pour autoriser les requêtes OPTIONS sur toutes les routes API
+@app.route('/api/<path:path>', methods=['OPTIONS'])
+def handle_options(path):
+    return '', 200
+
 # Lancement de l'application
 if __name__ == '__main__':
-    app.run(debug=True)
+     with app.app_context():
+        generate_all_alerts()  # Première exécution immédiate
+        start_scheduler()      # Démarrage du scheduler toutes les 7 secondes
+        # Initialiser le lecteur RFID
+        if init_arduino_serial():
+            rfid_thread = threading.Thread(target=read_rfid_data, daemon=True)
+            rfid_thread.start()
+            print("✅ Lecteur RFID démarré")
+        app.run(debug=True)
+
 

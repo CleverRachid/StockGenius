@@ -4,8 +4,22 @@ from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
 
 
+
 # Initialisation de SQLAlchemy
 db = SQLAlchemy()
+
+class Customer(db.Model):
+    __tablename__ = 'customers'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    phone = db.Column(db.String(20), nullable=True)
+    address = db.Column(db.String(255), nullable=True)
+
+    def __repr__(self):
+        return f'<Customer {self.name}>'
+    
+  
 
 class User(db.Model):
     __tablename__ = 'users'
@@ -116,9 +130,11 @@ class SensorData(db.Model):
     __tablename__ = 'sensor_data'
     
     id = db.Column(db.Integer, primary_key=True)
-    sensor_id = db.Column(db.Integer, db.ForeignKey('sensors.id'), nullable=False)
+    sensor_id = db.Column(db.Integer, db.ForeignKey('sensors.id'), nullable=True)
     value = db.Column(db.String(255), nullable=False)
     saved_at = db.Column(db.DateTime, default=datetime.utcnow)
+    stored = db.Column(db.Boolean, default=False)
+    
     
     def __repr__(self):
         return f'<SensorData {self.id} sensor_id={self.sensor_id}>'
@@ -147,7 +163,10 @@ class Order(db.Model):
     delivered_at = db.Column(db.DateTime)
     returned_at = db.Column(db.DateTime)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)  # L'utilisateur qui a créé la commande
-    
+    customer_id = db.Column(db.Integer, db.ForeignKey('customers.id'), nullable=False)  # Nouveau champ
+    # Relations SQLAlchemy
+    customer = db.relationship('Customer', backref=db.backref('orders', lazy=True))  # Relation avec Customer
+   
     def __repr__(self):
         return f'<Order {self.id} product_id={self.product_id}>'
 
